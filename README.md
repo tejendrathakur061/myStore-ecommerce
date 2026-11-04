@@ -119,7 +119,7 @@ Make sure you have installed:
 ### 2. Clone the Repository
 
 ```bash
-git clone https://github.com/tejendrathakur0/myStore-ecommerce.git
+git clone https://github.com/tejendrathakur061/myStore-ecommerce.git
 ```
 
 ```bash
