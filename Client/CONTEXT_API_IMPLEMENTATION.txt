@@ -1,0 +1,426 @@
+ECOMMERCE PROJECT: CONTEXT API IMPLEMENTATION GUIDE
+==================================================
+
+Purpose
+-------
+This guide explains how shared app data is managed with React Context and
+custom hooks, how the data still persists in localStorage, and how the main
+shopper/admin workflows move through the code.
+
+The implementation keeps page-specific UI state (for example, form fields,
+search text, validation messages, and password visibility) inside the page
+that owns it. Context is used for data that multiple pages need to share.
+
+
+1. APPLICATION STARTUP AND PROVIDER TREE
+----------------------------------------
+Entry point:
+  src/main.jsx
+
+src/main.jsx renders <App />. App.jsx wraps the router in <AppProvider />:
+
+  AppProvider
+    AuthContext
+      UsersContext
+        ProductsContext
+          CartContext
+            CartActionsContext
+              OrdersContext 
+                RouterProvider and all route pages
+
+The provider is above RouterProvider, so every route and component rendered
+by the router can access its state through the matching custom hook.
+
+Provider implementation:
+  src/context/AppProvider.jsx
+
+The context definitions live in:
+  src/context/AuthContext.js
+  src/context/UsersContext.js
+  src/context/ProductsContext.js
+  src/context/CartContext.js
+  src/context/OrdersContext.js
+
+Each context starts with null. Its custom hook checks that a provider exists
+and throws a clear error if the hook is accidentally called outside
+AppProvider.
+
+
+2. WHY THERE ARE SEPARATE CONTEXTS
+----------------------------------
+The app has several separate shared concerns:
+
+  Authentication: the logged-in user and login/logout actions.
+  Users: registered users and the register action.
+  Products: products and the add-product action.
+  Cart data: the cart and a function to select a user's cart items.
+  Cart actions: add/remove/update/clear cart operations.
+  Orders: saved orders and the place-order operation.
+
+This avoids one large context value changing whenever any single area changes.
+For example, ProductCard uses authentication and cart actions, not the whole
+cart data. A cart quantity change therefore does not change the value in
+CartActionsContext and does not need to rerender ProductCard because of the
+cart array alone.
+
+AppProvider uses useMemo for context values and useCallback for exposed
+actions. These keep provider values/functions stable when their dependencies
+have not changed. They are a rendering optimization; correctness still comes
+from React state updates and the dependency arrays.
+
+
+3. PERSISTENCE AND STATE INITIALIZATION
+----------------------------------------
+src/utils/LocalHelper.js remains the localStorage persistence layer. It
+provides read/write helpers for users, products, cart, orders, and the
+current user. AppProvider uses those functions when it initializes shared
+state and when a user action changes persistent data.
+
+On provider startup, lazy useState initializers read:
+  users       from localStorage key "users"
+  products    from key "products"
+  cart        from key "cart"
+  orders      from key "orders"
+  currentUser from key "currentUser"
+
+This makes the current browser data available immediately on initial render.
+The provider also calls setAdminInfo() once in an effect to retain the
+project's existing behavior of saving the built-in admin information.
+
+When a relevant action runs, the provider writes the updated data to
+localStorage and updates React state. React then rerenders consumers of that
+context. The existing storage keys and object formats are retained so current
+saved browser data remains usable.
+
+localStorage is persistence, not the live component state. Pages read the
+Context value; they should not independently reload localStorage for shared
+data because doing so would create stale copies.
+
+
+4. CUSTOM HOOKS AND WHAT THEY RETURN
+------------------------------------
+src/hooks/useAuth.js
+  useAuth() returns:
+    currentUser
+    login(user)
+    logout()
+
+src/hooks/useUsers.js
+  useUsers() returns:
+    users
+    registerUser(user)
+
+src/hooks/useProducts.js
+  useProducts() returns:
+    products
+    addProduct(product)
+
+src/hooks/useCart.js
+  useCart() returns:
+    cart
+    getUserCart(userId)
+
+  useCartActions() returns:
+    addToCart(userId, product)
+    removeFromCart(userId, productId)
+    updateCartQuantity(userId, productId, action)
+    clearUserCart(userId)
+
+src/hooks/useOrders.js
+  useOrders() returns:
+    orders
+    placeOrder(order)
+
+src/hooks/useDebounce.js
+  useDebounce(value, delay = 300) returns the latest value after it has
+  remained unchanged for the delay. It cancels the prior timer when the input
+  changes or the hook's component unmounts.
+
+Example use in a component:
+
+  const { products } = useProducts();
+  const { currentUser } = useAuth();
+
+Only request the contexts the component actually needs. This keeps component
+dependencies clear and helps avoid unrelated rerenders.
+
+
+5. PRODUCT MANAGEMENT AND SHOPPING FLOW
+----------------------------------------
+Admin creates a product:
+  1. AdminDashboard.jsx keeps product form fields and validation locally.
+  2. On successful submit it calls addProduct(newProduct) from useProducts().
+  3. AppProvider appends the product to its shared products state.
+  4. AppProvider calls saveProducts(), which persists to localStorage.
+  5. AdminProducts and shopper product pages see the state update immediately.
+
+Shopper searches and filters:
+  1. Products.jsx reads products through useProducts().
+  2. Search text and selected category are local UI state in Products.jsx.
+  3. useDebounce waits 300 milliseconds after typing pauses.
+  4. useMemo computes categories and filtered products from the current
+     products, debounced search text, and selected category.
+  5. Search checks name, description, and category without case sensitivity.
+  6. Category selection filters immediately; it is not debounced.
+  7. ProductCard displays each result.
+
+Shopper adds an item:
+  1. ProductCard reads currentUser via useAuth().
+  2. If no user is logged in, it navigates to /login.
+  3. Otherwise it calls addToCart(userId, product) from useCartActions().
+  4. AppProvider increments the quantity if the same product is already in
+     that user's cart; otherwise it adds the product with qty 1.
+  5. The updated cart is saved to localStorage and published through
+     CartContext.
+
+ProductDetail follows the same add-to-cart behavior. It gets the product from
+useProducts() rather than separately reading localStorage.
+
+
+6. CART UPDATE DETAILS
+----------------------
+Cart.jsx gets the current user from useAuth(), reads that user's items using
+getUserCart(userId), and uses useCartActions() for remove/quantity changes.
+The item list and total are derived from Context state, not copied into a
+second local useState value.
+
+AppProvider keeps cartRef synchronized with the latest cart. Cart actions
+read this ref before computing an update, then commitCart() updates the ref,
+persists the next cart with saveCart(), and updates React cart state. This
+avoids action callbacks using an outdated cart snapshot when actions happen
+close together.
+
+Quantity behavior remains:
+  "inc" increases quantity by one.
+  "dec" decreases quantity by one.
+  Decreasing an item already at quantity 1 removes it.
+  Removing an item directly removes it from that user's cart.
+  Checkout clears only the current user's cart.
+
+
+7. AUTHENTICATION AND USERS FLOW
+-------------------------------
+Login.jsx reads the user list through useUsers() and submits the matching
+account to login() from useAuth(). Admin credentials remain in
+LocalHelper.js. login() saves the current user to localStorage and updates
+Context state.
+
+Register.jsx checks the shared users list, creates the user, then calls
+registerUser(). AppProvider persists the account using saveUser() and updates
+the users state. The page keeps its registration fields and validation state
+locally.
+
+ProtectedRoutes.jsx and AuthRoute use useAuth() to make route decisions from
+the shared currentUser state. This keeps guards in sync with login/logout
+without each guard reading localStorage independently.
+
+Navbar.jsx and Admin.jsx call logout(), which removes the persisted current
+user and sets currentUser to null in Context before navigating to login.
+
+AdminUsers.jsx and Profile.jsx use the shared users/auth state rather than
+loading their own one-time user copies.
+
+
+8. ORDER FLOW
+-------------
+Checkout.jsx uses useAuth() to identify the customer, useCart() to read the
+cart, useCartActions() to clear it after success, and useOrders() to place
+the order.
+
+placeOrder(order):
+  1. Checks the current Context orders for a duplicate with the same user and
+     identical items.
+  2. Calls saveOrder(order), which also checks persisted orders for duplicates.
+  3. If successfully saved, appends the order to Context state and returns
+     true. A duplicate returns false.
+
+On success Checkout clears the user's cart and resets the local checkout
+form. Orders.jsx and AdminOrders.jsx read the same Context orders state, so
+new orders are reflected without a page-specific copy of the data.
+
+The provider checks the latest product inventory before accepting an order.
+If any cart quantity exceeds available stock, it refuses the order and
+Checkout asks the shopper to update the cart. On a successful order, the
+provider subtracts purchased quantities from product stock and persists the
+updated products with the same product object fields. Add-to-cart and cart
+increment actions also prevent adding beyond current stock.
+
+
+9. RESPONSIBILITY BOUNDARIES
+----------------------------
+Use Context for:
+  Data needed across routes/components.
+  Mutations that must update multiple screens.
+  Session/user data shared by guards and pages.
+
+Keep state local for:
+  Search input and selected product category.
+  Login/register/checkout form fields.
+  Validation messages and show/hide password controls.
+  Other temporary state used only by one page/component.
+
+Keep LocalHelper for:
+  Reading and writing the existing localStorage format.
+  The admin credential constant.
+  Duplicate order persistence checks.
+
+Do not add a Context for every value. Context is not a replacement for all
+useState calls; using it for local-only state would make ownership less clear
+and could cause more components to rerender.
+
+
+10. COMMON CHANGE RECIPES
+-------------------------
+To add a shared product operation:
+  1. Implement it in AppProvider.
+  2. Persist changes with the matching LocalHelper function.
+  3. Include the operation in productsValue.
+  4. Call it from useProducts() in the page/component.
+
+To add cart behavior:
+  1. Implement the operation in AppProvider using the latest cart.
+  2. Persist through commitCart().
+  3. Expose it through CartActionsContext.
+  4. Read or call it with useCart() or useCartActions().
+
+To add a shared state domain:
+  1. Define a context in src/context.
+  2. Initialize and update that domain in AppProvider.
+  3. Memoize its value separately.
+  4. Add a custom hook in src/hooks with the provider guard.
+  5. Wrap consumers with the new provider and switch only the relevant pages.
+
+After changes, run:
+  npm.cmd run build
+  npm.cmd run lint
+
+The repository may report lint errors in unrelated existing code; check the
+specific file and rule before treating a lint failure as caused by a Context
+change.
+
+
+11. PROJECT IMPLEMENTATION CHANGE LOG
+-------------------------------------
+This section records the requested implementation work and the final files
+that contain it. It describes the current source tree, not intermediate
+versions used while organizing the Context implementation.
+
+Task A - Add Context API and custom hooks:
+  Shared products, registered users, login state, cart, and orders are now
+  owned by AppProvider and exposed through the domain-specific contexts and
+  hooks described above.
+
+Task B - Keep existing product behavior while sharing state:
+  AdminDashboard adds a product through useProducts().
+  AdminProducts, Products, and ProductDetail read the same products state.
+  Product data continues to use the existing "products" localStorage key.
+
+Task C - Add shopper product search and category filtering:
+  Products.jsx has a search field and category selector.
+  Search matches product name, description, or category, case-insensitively.
+  The selector is populated from the available product categories.
+  A no-match message is shown when the selected search/category combination
+  returns no products.
+
+Task D - Debounce product search:
+  useDebounce.js delays applying the search query by 300 milliseconds.
+  The text input itself updates immediately; only the filtering waits.
+  Category selection remains immediate.
+
+Task E - Replace browser alerts with inline UI feedback:
+  No alert() browser popups remain in src.
+  Registration displays an inline error for missing fields and for an email
+  that already has an account. The duplicate-email message suggests logging
+  in instead.
+  ProductCard and ProductDetail show an inline confirmation after the product
+  is added to the signed-in user's cart.
+  Checkout shows inline messages for an empty cart, a duplicate order, a
+  successful order, and the sign-in condition. Error and success messages use
+  different visual styles and accessible alert/status live regions.
+  Existing navigation and successful submission behavior are retained.
+
+Task F - Document the implementation:
+  This file is the plain-text explanation of the Context structure, hooks,
+  persistence, application workflows, responsibility boundaries, and changes.
+
+
+12. FINAL FILE INVENTORY
+------------------------
+Added files:
+  CONTEXT_API_IMPLEMENTATION.txt
+  src/context/AppProvider.jsx
+  src/context/AuthContext.js
+  src/context/CartContext.js
+  src/context/OrdersContext.js
+  src/context/ProductsContext.js
+  src/context/UsersContext.js
+  src/hooks/useAuth.js
+  src/hooks/useCart.js
+  src/hooks/useDebounce.js
+  src/hooks/useOrders.js
+  src/hooks/useProducts.js
+  src/hooks/useUsers.js
+
+Modified files:
+  src/App.jsx
+  src/components/ProductCard.jsx
+  src/pages/Admin.jsx
+  src/pages/AdminDashboard.jsx
+  src/pages/AdminOrders.jsx
+  src/pages/AdminProducts.jsx
+  src/pages/AdminUsers.jsx
+  src/pages/Cart.jsx
+  src/pages/Checkout.jsx
+  src/pages/Login.jsx
+  src/pages/Navbar.jsx
+  src/pages/Orders.jsx
+  src/pages/ProductDetail.jsx
+  src/pages/Products.jsx
+  src/pages/Profile.jsx
+  src/pages/Register.jsx
+  src/utils/LocalHelper.js
+  src/utils/ProtectedRoutes.jsx
+
+Removed/retired during the migration:
+  The temporary one-purpose ProductContext/ProductProvider implementation
+  was consolidated into AppProvider and the domain-specific contexts above.
+  The temporary useApp hook was removed when consumers were switched to
+  focused hooks such as useAuth, useCart, useProducts, and useOrders.
+  LocalHelper no longer owns addToCart, getUserCart, removeFromCart,
+  clearUserCart, or handleProfile. These are now Context operations or
+  derived values. LocalHelper remains responsible for localStorage
+  persistence and the built-in admin credential constant.
+
+Files/components not globally migrated:
+  Page-only state was intentionally left local. Examples include product
+  search/filter controls, registration/login/checkout form values, password
+  visibility, field validation, and transient success/error feedback.
+  This preserves clear ownership and avoids making short-lived UI state
+  global.
+
+
+13. USER FEEDBACK AND ACCESSIBILITY DETAILS
+-------------------------------------------
+The former browser alert dialogs blocked interaction and were visually
+separate from the application. They are now replaced with messages rendered
+inside the relevant product or checkout UI.
+
+  role="status" and aria-live="polite" are used for non-urgent successful
+  feedback, such as adding an item to the cart or placing an order.
+
+  role="alert" is used for registration errors. Checkout selects alert for
+  errors and status for success, with assertive announcements for errors and
+  polite announcements for success.
+
+Messages use the existing green/cream palette for success and the existing
+red error styling. Editing the relevant registration/checkout fields clears
+the stale message so users get feedback that corresponds to their latest
+attempt.
+
+
+14. VERIFICATION NOTES
+----------------------
+The production build and full-project lint pass after the implementation
+changes. Order IDs are still numeric timestamps; timestamp generation lives
+in src/utils/createOrderId.js to keep the order data shape unchanged while
+keeping the checkout component lint-clean.
